@@ -1,0 +1,116 @@
+name: CD - Continuous Deployment
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+
+env:
+  NODE_VERSION: '20.x'
+
+jobs:
+  # Build and scan Docker images
+  build-and-scan:
+    runs-on: ubuntu-latest
+    name: Build & Security Scan
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Build Server Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./server
+          push: false
+          tags: taskflow-pro-server:${{ github.sha }}
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: Build Client Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./client
+          push: false
+          tags: taskflow-pro-client:${{ github.sha }}
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: Scan Server Image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: taskflow-pro-server:${{ github.sha }}
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+      
+      - name: Scan Client Image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: taskflow-pro-client:${{ github.sha }}
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+
+  # Deploy to production
+  deploy-production:
+    runs-on: ubuntu-latest
+    name: Deploy to Production
+    needs: build-and-scan
+    environment:
+      name: production
+      url: https://yourdomain.com
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.PRODUCTION_HOST }}
+          username: ${{ secrets.PRODUCTION_USER }}
+          key: ${{ secrets.PRODUCTION_SSH_KEY }}
+          port: ${{ secrets.PRODUCTION_PORT || 22 }}
+          script: |
+            cd /opt/taskflow-pro
+            git pull origin main
+            chmod +x scripts/deploy-production.sh
+            ./scripts/deploy-production.sh
+      
+      - name: Wait for Deployment
+        run: sleep 30
+      
+      - name: Health Check
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" https://yourdomain.com/health)
+          if [ $response -eq 200 ]; then
+            echo "Health check passed"
+          else
+            echo "Health check failed with status: $response"
+            exit 1
+          fi
+      
+      - name: Notify Success
+        if: success()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          text: '✅ TaskFlow Pro v${{ github.ref_name }} deployed to production successfully!'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+      
+      - name: Notify Failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          text: '❌ TaskFlow Pro deployment to production failed!'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
